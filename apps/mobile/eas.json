@@ -1,0 +1,25 @@
+{
+  "cli": { "version": ">= 10.0.0" },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "http://10.250.124.61:3001/api/v1"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://tu-backend.railway.app/api/v1"
+      }
+    },
+    "production": {
+      "android": { "buildType": "app-bundle" },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://tu-backend.railway.app/api/v1"
+      }
+    }
+  }
+}

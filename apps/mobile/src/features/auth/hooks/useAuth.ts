@@ -34,3 +34,8 @@ export function useLogout() {
 export function useForgotPassword() {
   return useMutation({ mutationFn: authService.forgotPassword });
 }
+
+export function useResetPassword() {
+  return useMutation({ mutationFn: authService.resetPassword });
+}
+

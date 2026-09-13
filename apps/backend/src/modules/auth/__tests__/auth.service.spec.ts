@@ -7,6 +7,7 @@ import { AuthService } from '../auth.service';
 import { UserOrmEntity } from '../../../infrastructure/database/typeorm/entities/user.entity';
 import { RedisService } from '../../../infrastructure/cache/redis.service';
 import { MailerService } from '../../../infrastructure/external/mailer.service';
+import { AuditService } from '../../../shared/security/audit.service';
 import * as bcrypt from 'bcrypt';
 
 // ─── Mocks ──────────────────────────────────────────────
@@ -46,6 +47,10 @@ const mockMailerService = {
   resetPasswordTemplate: jest.fn().mockReturnValue('<html/>'),
 };
 
+const mockAuditService = {
+  log: jest.fn().mockResolvedValue(undefined),
+};
+
 // ─── Suite ──────────────────────────────────────────────
 describe('AuthService', () => {
   let service: AuthService;
@@ -59,6 +64,7 @@ describe('AuthService', () => {
         { provide: ConfigService, useValue: mockConfigService },
         { provide: RedisService,  useValue: mockRedisService },
         { provide: MailerService, useValue: mockMailerService },
+        { provide: AuditService,  useValue: mockAuditService },
       ],
     }).compile();
 
@@ -145,6 +151,49 @@ describe('AuthService', () => {
         '1',
         expect.any(Number),
       );
+    });
+  });
+
+  // ── forgotPassword ────────────────────────────────────
+  describe('forgotPassword', () => {
+    it('genera token y envía correo si el usuario existe', async () => {
+      mockUserRepo.findOne.mockResolvedValue({
+        id: 'uuid-1',
+        email: 'test@reity.co',
+        fullName: 'Test User',
+      });
+      mockRedisService.get.mockResolvedValue('0');
+
+      const res = await service.forgotPassword('test@reity.co');
+      expect(res.message).toBeDefined();
+      expect(mockMailerService.send).toHaveBeenCalled();
+      expect(mockRedisService.set).toHaveBeenCalled();
+    });
+
+    it('no falla si el email no existe (previene enumeración)', async () => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+      const res = await service.forgotPassword('noexiste@reity.co');
+      expect(res.message).toBeDefined();
+      expect(mockMailerService.send).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── resetPassword ─────────────────────────────────────
+  describe('resetPassword', () => {
+    it('restablece contraseña con código de 6 dígitos', async () => {
+      mockRedisService.get.mockResolvedValue('uuid-1');
+      const fakeUser = { id: 'uuid-1', email: 'test@reity.co', passwordHash: 'old' };
+      mockUserRepo.findOne.mockResolvedValue(fakeUser);
+      mockUserRepo.save.mockResolvedValue(fakeUser);
+
+      const res = await service.resetPassword({
+        token: '123456',
+        newPassword: 'NewPassword123!',
+      });
+
+      expect(res.message).toBe('Contraseña actualizada correctamente');
+      expect(mockUserRepo.save).toHaveBeenCalled();
+      expect(mockRedisService.del).toHaveBeenCalled();
     });
   });
 });

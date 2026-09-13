@@ -2,13 +2,11 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import { DataSource } from 'typeorm';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './shared/filters/http-exception.filter';
 import { TransformInterceptor } from './shared/interceptors/transform.interceptor';
 import { LoggingInterceptor } from './shared/interceptors/logging.interceptor';
-import { seedCategories } from './infrastructure/database/seeds/categories.seed';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'log'] });
@@ -61,13 +59,6 @@ async function bootstrap() {
       .build();
     SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, swaggerConfig));
     console.log(`Swagger: http://localhost:${port}/docs`);
-  }
-
-  // ── Seed categorias ───────────────────────────────────
-  try {
-    await seedCategories(app.get(DataSource));
-  } catch (err) {
-    console.warn('Seed categorias:', err.message);
   }
 
   await app.listen(port, '0.0.0.0');

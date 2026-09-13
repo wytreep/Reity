@@ -25,10 +25,22 @@ export default function ForgotPasswordScreen() {
 
   if (sent) return (
     <View style={styles.container}>
-      <Text style={styles.icon}>📧</Text>
-      <Text style={styles.successTitle}>Revisa tu correo</Text>
-      <Text style={styles.successText}>Si el email está registrado, recibirás instrucciones pronto.</Text>
-      <Button label="Volver al login" onPress={() => router.replace('/(auth)/login')} variant="outline" style={{ marginTop: 24 }} />
+      <Text style={styles.icon}>📬</Text>
+      <Text style={styles.successTitle}>Solicitud enviada</Text>
+      <Text style={styles.successText}>
+        Si tu email está registrado, recibirás un correo con tu código de seguridad de 6 dígitos.
+      </Text>
+      <Button
+        label="Ingresar código de 6 dígitos"
+        onPress={() => router.push({ pathname: '/(auth)/reset-password', params: { email: email.trim().toLowerCase() } })}
+        style={{ marginTop: 24 }}
+      />
+      <Button
+        label="Volver al login"
+        onPress={() => router.replace('/(auth)/login')}
+        variant="outline"
+        style={{ marginTop: 12 }}
+      />
     </View>
   );
 
@@ -39,9 +51,29 @@ export default function ForgotPasswordScreen() {
           <Text style={{ color: Colors.primary, fontSize: 14 }}>← Volver</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Recuperar contraseña</Text>
-        <Text style={styles.subtitle}>Ingresa tu email y te enviaremos un enlace de recuperación.</Text>
-        <Input label="Correo electrónico" placeholder="tu@email.com" value={email} onChangeText={setEmail} leftIcon="mail-outline" keyboardType="email-address" error={emailError} containerStyle={{ marginBottom: 24 }} />
-        <Button label="Enviar instrucciones" onPress={handleSubmit} loading={forgotMutation.isPending} />
+        <Text style={styles.subtitle}>
+          Ingresa tu correo electrónico y te enviaremos un código de seguridad para crear una nueva contraseña.
+        </Text>
+        <Input
+          label="Correo electrónico"
+          placeholder="tu@email.com"
+          value={email}
+          onChangeText={setEmail}
+          leftIcon="mail-outline"
+          keyboardType="email-address"
+          error={emailError}
+          containerStyle={{ marginBottom: 20 }}
+        />
+        <Button label="Enviar código" onPress={handleSubmit} loading={forgotMutation.isPending} />
+
+        <TouchableOpacity
+          onPress={() => router.push('/(auth)/reset-password')}
+          style={{ marginTop: 20, alignSelf: 'center', padding: 8 }}
+        >
+          <Text style={{ color: Colors.primaryLight, fontSize: 13, fontWeight: '500' }}>
+            ¿Ya tienes un código? Ingresar directamente →
+          </Text>
+        </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
   );
@@ -54,5 +86,5 @@ const styles = StyleSheet.create({
   title: { fontSize: 26, fontWeight: '700', color: Colors.textPrimary, letterSpacing: -0.5, marginBottom: 8 },
   subtitle: { fontSize: 14, color: Colors.textSecondary, lineHeight: 20, marginBottom: 32 },
   successTitle: { fontSize: 22, fontWeight: '700', color: Colors.textPrimary, textAlign: 'center', marginBottom: 12 },
-  successText: { fontSize: 15, color: Colors.textSecondary, textAlign: 'center', lineHeight: 22 },
+  successText: { fontSize: 15, color: Colors.textSecondary, textAlign: 'center', lineHeight: 22, paddingHorizontal: 8 },
 });

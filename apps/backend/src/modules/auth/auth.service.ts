@@ -6,7 +6,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import * as bcrypt from 'bcryptjs';
+import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { UserOrmEntity } from '../../infrastructure/database/typeorm/entities/user.entity';
 import { RedisService } from '../../infrastructure/cache/redis.service';
@@ -14,6 +14,7 @@ import { MailerService } from '../../infrastructure/external/mailer.service';
 import { AuditService } from '../../shared/security/audit.service';
 import { SECURITY } from '../../shared/security/security.constants';
 import { enforcePasswordPolicy } from '../../shared/security/password.validator';
+import { validateRealEmail } from '../../shared/security/email.validator';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
@@ -33,13 +34,36 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto, ip = 'unknown', ua = '') {
+    // 1. Validar complejidad de contraseña
     enforcePasswordPolicy(dto.password);
+
+    // 2. Validar que el dominio del correo sea real y activo (MX check)
+    await validateRealEmail(dto.email);
+
+    // 3. Comprobar si ya existe
     const exists = await this.userRepo.findOne({ where: { email: dto.email } });
     if (exists) throw new ConflictException('El email ya está registrado');
 
+    // 4. Crear usuario con hash seguro
     const passwordHash = await bcrypt.hash(dto.password, SECURITY.BCRYPT_ROUNDS);
     const user = this.userRepo.create({ email: dto.email, passwordHash, fullName: dto.fullName, currency: 'COP' });
     await this.userRepo.save(user);
+
+    // 5. Enviar correo de bienvenida con políticas de privacidad
+    try {
+      const nowFormatted = new Date().toLocaleString('es-CO', {
+        timeZone: 'America/Bogota',
+        dateStyle: 'long',
+        timeStyle: 'short',
+      });
+      await this.mailer.send({
+        to: user.email,
+        subject: '¡Bienvenido a Reity! Confirmación de cuenta y políticas de privacidad',
+        html: this.mailer.welcomeEmailTemplate(user.fullName, user.email, nowFormatted),
+      });
+    } catch (err: any) {
+      this.logger.warn(`No se pudo enviar el correo de bienvenida a ${user.email}: ${err?.message || err}`);
+    }
 
     await this.audit.log({ event: 'REGISTER_SUCCESS', email: user.email, userId: user.id, ip, userAgent: ua, timestamp: new Date().toISOString() });
     return { user: this.sanitizeUser(user), ...(await this.generateTokens(user.id, user.email)) };
@@ -108,39 +132,84 @@ export class AuthService {
       if (requests <= 3) {
         const resetToken  = crypto.randomBytes(32).toString('hex');
         const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
-        await this.redis.set(SECURITY.REDIS_KEYS.RESET_TOKEN(hashedToken), user.id, SECURITY.RESET_TOKEN_TTL);
+        const code        = Math.floor(100000 + crypto.randomInt(900000)).toString();
+
+        await Promise.all([
+          this.redis.set(SECURITY.REDIS_KEYS.RESET_TOKEN(hashedToken), user.id, SECURITY.RESET_TOKEN_TTL),
+          this.redis.set(SECURITY.REDIS_KEYS.RESET_CODE(code), user.id, SECURITY.RESET_TOKEN_TTL),
+        ]);
 
         const appUrl   = this.config.get('APP_URL', 'reity://');
-        const resetUrl = appUrl + '/reset-password?token=' + resetToken;
+        const resetUrl = `${appUrl}/reset-password?token=${resetToken}&email=${encodeURIComponent(user.email)}`;
 
         try {
-          await this.mailer.send({ to: user.email, subject: 'Recupera tu contrasena - Reity', html: this.mailer.resetPasswordTemplate(user.fullName, resetUrl) });
-        } catch (err) {
-          this.logger.error('Error enviando email:', err.message);
+          await this.mailer.send({
+            to: user.email,
+            subject: 'Recupera tu contraseña - Reity',
+            html: this.mailer.resetPasswordTemplate(user.fullName, resetUrl, code),
+            code,
+            resetUrl,
+          });
+        } catch (err: any) {
+          this.logger.error('Error enviando email:', err?.message || err);
         }
 
-        await this.audit.log({ event: 'PASSWORD_RESET_REQUEST', email: user.email, userId: user.id, ip, userAgent: ua, timestamp: new Date().toISOString() });
+        await this.audit.log({
+          event: 'PASSWORD_RESET_REQUEST',
+          email: user.email,
+          userId: user.id,
+          ip,
+          userAgent: ua,
+          timestamp: new Date().toISOString(),
+          metadata: { codeGenerated: true },
+        });
       }
     }
 
-    return { message: 'Si el email esta registrado, recibiras instrucciones' };
+    return { message: 'Si el email está registrado, recibirás las instrucciones en breve' };
   }
 
   async resetPassword(dto: ResetPasswordDto, ip = 'unknown', ua = '') {
     enforcePasswordPolicy(dto.newPassword);
-    const hashedToken = crypto.createHash('sha256').update(dto.token).digest('hex');
-    const userId = await this.redis.get(SECURITY.REDIS_KEYS.RESET_TOKEN(hashedToken));
-    if (!userId) throw new BadRequestException('Token invalido o expirado');
+    const tokenInput = dto.token.trim();
+    let userId: string | null = null;
+    let tokenKeyToDelete: string | null = null;
+    let codeKeyToDelete: string | null = null;
+
+    if (/^\d{6}$/.test(tokenInput)) {
+      codeKeyToDelete = SECURITY.REDIS_KEYS.RESET_CODE(tokenInput);
+      userId = await this.redis.get(codeKeyToDelete);
+    } else {
+      const hashedToken = crypto.createHash('sha256').update(tokenInput).digest('hex');
+      tokenKeyToDelete = SECURITY.REDIS_KEYS.RESET_TOKEN(hashedToken);
+      userId = await this.redis.get(tokenKeyToDelete);
+    }
+
+    if (!userId) {
+      throw new BadRequestException('El código o enlace de recuperación es inválido o ha expirado');
+    }
 
     const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (!user) throw new NotFoundException('Usuario no encontrado');
+    if (!user) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
 
     user.passwordHash = await bcrypt.hash(dto.newPassword, SECURITY.BCRYPT_ROUNDS);
     await this.userRepo.save(user);
-    await this.redis.del(SECURITY.REDIS_KEYS.RESET_TOKEN(hashedToken));
 
-    await this.audit.log({ event: 'PASSWORD_RESET_SUCCESS', email: user.email, userId: user.id, ip, userAgent: ua, timestamp: new Date().toISOString() });
-    return { message: 'Contrasena actualizada correctamente' };
+    if (tokenKeyToDelete) await this.redis.del(tokenKeyToDelete);
+    if (codeKeyToDelete)  await this.redis.del(codeKeyToDelete);
+
+    await this.audit.log({
+      event: 'PASSWORD_RESET_SUCCESS',
+      email: user.email,
+      userId: user.id,
+      ip,
+      userAgent: ua,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { message: 'Contraseña actualizada correctamente' };
   }
 
   private async generateTokens(userId: string, email: string) {

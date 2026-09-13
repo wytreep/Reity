@@ -27,6 +27,7 @@ export const SECURITY = {
     ACCOUNT_LOCKED: (email: string) => `security:login:locked:${email}`,
     REFRESH_BLACKLIST: (hash: string) => `auth:blacklist:refresh:${hash}`,
     RESET_TOKEN: (hash: string) => `auth:reset:${hash}`,
+    RESET_CODE: (code: string) => `auth:reset:code:${code}`,
     AUDIT_LOG: (userId: string) => `security:audit:${userId}`,
   },
 } as const;
