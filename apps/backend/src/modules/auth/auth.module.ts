@@ -24,7 +24,6 @@ import { MailerService } from '../../infrastructure/external/mailer.service';
     }),
   ],
   controllers: [AuthController],
-  // RedisService ya está en CacheModule @Global, no necesita importarse
   providers: [AuthService, JwtStrategy, RefreshStrategy, MailerService],
   exports: [AuthService],
 })

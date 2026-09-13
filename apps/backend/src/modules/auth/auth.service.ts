@@ -1,31 +1,22 @@
 import {
-  Injectable,
-  UnauthorizedException,
-  ConflictException,
-  NotFoundException,
-  BadRequestException,
-  Logger,
+  Injectable, UnauthorizedException, ConflictException,
+  NotFoundException, BadRequestException, Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import * as bcrypt from 'bcrypt';
+import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import { UserOrmEntity } from '../../infrastructure/database/typeorm/entities/user.entity';
 import { RedisService } from '../../infrastructure/cache/redis.service';
 import { MailerService } from '../../infrastructure/external/mailer.service';
+import { AuditService } from '../../shared/security/audit.service';
+import { SECURITY } from '../../shared/security/security.constants';
+import { enforcePasswordPolicy } from '../../shared/security/password.validator';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
-
-// Prefijos de claves Redis
-const REFRESH_BLACKLIST = 'auth:blacklist:refresh:';
-const RESET_TOKEN       = 'auth:reset:';
-
-// TTLs en segundos
-const REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 días
-const RESET_TTL_SECONDS   = 15 * 60;           // 15 minutos
 
 @Injectable()
 export class AuthService {
@@ -38,175 +29,142 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly redis: RedisService,
     private readonly mailer: MailerService,
+    private readonly audit: AuditService,
   ) {}
 
-  // ─────────────────────────────────────────────────────────
-  // REGISTER
-  // ─────────────────────────────────────────────────────────
-  async register(dto: RegisterDto) {
+  async register(dto: RegisterDto, ip = 'unknown', ua = '') {
+    enforcePasswordPolicy(dto.password);
     const exists = await this.userRepo.findOne({ where: { email: dto.email } });
     if (exists) throw new ConflictException('El email ya está registrado');
 
-    const passwordHash = await bcrypt.hash(dto.password, 12);
-    const user = this.userRepo.create({
-      email: dto.email,
-      passwordHash,
-      fullName: dto.fullName,
-      currency: 'COP',
-    });
+    const passwordHash = await bcrypt.hash(dto.password, SECURITY.BCRYPT_ROUNDS);
+    const user = this.userRepo.create({ email: dto.email, passwordHash, fullName: dto.fullName, currency: 'COP' });
     await this.userRepo.save(user);
-    this.logger.log(`Nuevo usuario registrado: ${user.email}`);
 
-    const tokens = await this.generateTokens(user.id, user.email);
-    return { user: this.sanitizeUser(user), ...tokens };
+    await this.audit.log({ event: 'REGISTER_SUCCESS', email: user.email, userId: user.id, ip, userAgent: ua, timestamp: new Date().toISOString() });
+    return { user: this.sanitizeUser(user), ...(await this.generateTokens(user.id, user.email)) };
   }
 
-  // ─────────────────────────────────────────────────────────
-  // LOGIN
-  // ─────────────────────────────────────────────────────────
-  async login(dto: LoginDto) {
+  async login(dto: LoginDto, ip = 'unknown', ua = '') {
+    const attemptsKey = SECURITY.REDIS_KEYS.LOGIN_ATTEMPTS(dto.email);
+    const lockKey     = SECURITY.REDIS_KEYS.ACCOUNT_LOCKED(dto.email);
+
     const user = await this.userRepo.findOne({ where: { email: dto.email } });
-
-    // Comparación constante aunque el usuario no exista → evita timing attacks
     const dummyHash = '$2b$12$invalidhashforcomparison000000000000000000000';
-    const valid = user
-      ? await bcrypt.compare(dto.password, user.passwordHash)
-      : await bcrypt.compare(dto.password, dummyHash);
+    const valid = user ? await bcrypt.compare(dto.password, user.passwordHash) : (await bcrypt.compare(dto.password, dummyHash), false);
 
-    if (!user || !valid) throw new UnauthorizedException('Credenciales inválidas');
+    if (!user || !valid) {
+      const attempts = await this.incrementWithTTL(attemptsKey, SECURITY.ATTEMPT_TTL_SECONDS);
+      await this.audit.log({ event: 'LOGIN_FAILED', email: dto.email, ip, userAgent: ua, timestamp: new Date().toISOString(), metadata: { attempts } });
 
-    const tokens = await this.generateTokens(user.id, user.email);
-    return { user: this.sanitizeUser(user), ...tokens };
-  }
+      if (attempts >= SECURITY.MAX_LOGIN_ATTEMPTS) {
+        await this.redis.set(lockKey, '1', SECURITY.LOCKOUT_TTL_SECONDS);
+        await this.redis.del(attemptsKey);
+        throw new UnauthorizedException(`Cuenta bloqueada por ${SECURITY.LOCKOUT_TTL_SECONDS / 60} minutos`);
+      }
 
-  // ─────────────────────────────────────────────────────────
-  // REFRESH TOKENS
-  // ─────────────────────────────────────────────────────────
-  async refreshTokens(refreshToken: string) {
-    // 1. Verificar firma y expiración
-    let payload: { sub: string; email: string };
-    try {
-      payload = this.jwtService.verify(refreshToken, {
-        secret: this.config.get('JWT_REFRESH_SECRET'),
-      });
-    } catch {
-      throw new UnauthorizedException('Refresh token inválido o expirado');
+      const remaining = SECURITY.MAX_LOGIN_ATTEMPTS - attempts;
+      throw new UnauthorizedException(`Credenciales invalidas. ${remaining} intento${remaining !== 1 ? 's' : ''} restante${remaining !== 1 ? 's' : ''}`);
     }
 
-    // 2. Verificar que no esté en blacklist
-    const isBlacklisted = await this.redis.exists(
-      `${REFRESH_BLACKLIST}${this.hashToken(refreshToken)}`,
-    );
-    if (isBlacklisted) throw new UnauthorizedException('Refresh token revocado');
+    await this.redis.del(attemptsKey);
+    await this.audit.log({ event: 'LOGIN_SUCCESS', email: user.email, userId: user.id, ip, userAgent: ua, timestamp: new Date().toISOString() });
+    return { user: this.sanitizeUser(user), ...(await this.generateTokens(user.id, user.email)) };
+  }
 
-    // 3. Verificar que el usuario sigue existiendo
+  async refreshTokens(refreshToken: string, ip = 'unknown', ua = '') {
+    let payload: { sub: string; email: string };
+    try {
+      payload = this.jwtService.verify(refreshToken, { secret: this.config.get('JWT_REFRESH_SECRET') });
+    } catch {
+      throw new UnauthorizedException('Refresh token invalido o expirado');
+    }
+
+    const hash = this.hashToken(refreshToken);
+    if (await this.redis.exists(SECURITY.REDIS_KEYS.REFRESH_BLACKLIST(hash))) {
+      throw new UnauthorizedException('Token revocado');
+    }
+
     const user = await this.userRepo.findOne({ where: { id: payload.sub } });
     if (!user) throw new UnauthorizedException('Usuario no encontrado');
 
-    // 4. Rotar tokens: invalidar el actual y emitir nuevos
     await this.blacklistRefreshToken(refreshToken);
+    await this.audit.log({ event: 'TOKEN_REFRESHED', userId: user.id, ip, userAgent: ua, timestamp: new Date().toISOString() });
     return this.generateTokens(user.id, user.email);
   }
 
-  // ─────────────────────────────────────────────────────────
-  // LOGOUT
-  // ─────────────────────────────────────────────────────────
-  async logout(refreshToken: string) {
-    if (refreshToken) {
-      await this.blacklistRefreshToken(refreshToken);
-    }
-    return { message: 'Sesión cerrada correctamente' };
+  async logout(refreshToken: string, userId?: string, ip = 'unknown', ua = '') {
+    if (refreshToken) await this.blacklistRefreshToken(refreshToken);
+    await this.audit.log({ event: 'LOGOUT', userId, ip, userAgent: ua, timestamp: new Date().toISOString() });
+    return { message: 'Sesion cerrada correctamente' };
   }
 
-  // ─────────────────────────────────────────────────────────
-  // FORGOT PASSWORD
-  // ─────────────────────────────────────────────────────────
-  async forgotPassword(email: string) {
-    // Respuesta genérica siempre → no revela si el email existe
+  async forgotPassword(email: string, ip = 'unknown', ua = '') {
     const user = await this.userRepo.findOne({ where: { email } });
 
     if (user) {
-      const resetToken = crypto.randomBytes(32).toString('hex');
-      const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+      const limitKey = `auth:reset:limit:${email}`;
+      const requests = await this.incrementWithTTL(limitKey, 3600);
+      if (requests <= 3) {
+        const resetToken  = crypto.randomBytes(32).toString('hex');
+        const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+        await this.redis.set(SECURITY.REDIS_KEYS.RESET_TOKEN(hashedToken), user.id, SECURITY.RESET_TOKEN_TTL);
 
-      // Guardar hash en Redis con TTL 15 min
-      await this.redis.set(
-        `${RESET_TOKEN}${hashedToken}`,
-        user.id,
-        RESET_TTL_SECONDS,
-      );
+        const appUrl   = this.config.get('APP_URL', 'reity://');
+        const resetUrl = appUrl + '/reset-password?token=' + resetToken;
 
-      const appUrl = this.config.get('APP_URL', 'reity://');
-      const resetUrl = `${appUrl}/reset-password?token=${resetToken}`;
+        try {
+          await this.mailer.send({ to: user.email, subject: 'Recupera tu contrasena - Reity', html: this.mailer.resetPasswordTemplate(user.fullName, resetUrl) });
+        } catch (err) {
+          this.logger.error('Error enviando email:', err.message);
+        }
 
-      try {
-        await this.mailer.send({
-          to: user.email,
-          subject: 'Recupera tu contraseña — Reity',
-          html: this.mailer.resetPasswordTemplate(user.fullName, resetUrl),
-        });
-      } catch (err) {
-        this.logger.error('Error enviando email de recuperación:', err.message);
-        // No lanzar error al cliente → el usuario no sabe si el email existe
+        await this.audit.log({ event: 'PASSWORD_RESET_REQUEST', email: user.email, userId: user.id, ip, userAgent: ua, timestamp: new Date().toISOString() });
       }
     }
 
-    return { message: 'Si el email está registrado, recibirás instrucciones' };
+    return { message: 'Si el email esta registrado, recibiras instrucciones' };
   }
 
-  // ─────────────────────────────────────────────────────────
-  // RESET PASSWORD
-  // ─────────────────────────────────────────────────────────
-  async resetPassword(dto: ResetPasswordDto) {
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(dto.token)
-      .digest('hex');
-
-    const userId = await this.redis.get(`${RESET_TOKEN}${hashedToken}`);
-    if (!userId) throw new BadRequestException('Token inválido o expirado');
+  async resetPassword(dto: ResetPasswordDto, ip = 'unknown', ua = '') {
+    enforcePasswordPolicy(dto.newPassword);
+    const hashedToken = crypto.createHash('sha256').update(dto.token).digest('hex');
+    const userId = await this.redis.get(SECURITY.REDIS_KEYS.RESET_TOKEN(hashedToken));
+    if (!userId) throw new BadRequestException('Token invalido o expirado');
 
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('Usuario no encontrado');
 
-    user.passwordHash = await bcrypt.hash(dto.newPassword, 12);
+    user.passwordHash = await bcrypt.hash(dto.newPassword, SECURITY.BCRYPT_ROUNDS);
     await this.userRepo.save(user);
+    await this.redis.del(SECURITY.REDIS_KEYS.RESET_TOKEN(hashedToken));
 
-    // Invalidar el token de reset inmediatamente
-    await this.redis.del(`${RESET_TOKEN}${hashedToken}`);
-
-    this.logger.log(`Contraseña restablecida para: ${user.email}`);
-    return { message: 'Contraseña actualizada correctamente' };
+    await this.audit.log({ event: 'PASSWORD_RESET_SUCCESS', email: user.email, userId: user.id, ip, userAgent: ua, timestamp: new Date().toISOString() });
+    return { message: 'Contrasena actualizada correctamente' };
   }
-
-  // ─────────────────────────────────────────────────────────
-  // HELPERS PRIVADOS
-  // ─────────────────────────────────────────────────────────
 
   private async generateTokens(userId: string, email: string) {
     const payload = { sub: userId, email };
     const [accessToken, refreshToken] = await Promise.all([
-      this.jwtService.signAsync(payload),
-      this.jwtService.signAsync(payload, {
-        secret: this.config.get('JWT_REFRESH_SECRET'),
-        expiresIn: this.config.get('JWT_REFRESH_EXPIRATION', '7d'),
-      }),
+      this.jwtService.signAsync(payload, { expiresIn: SECURITY.ACCESS_TOKEN_TTL }),
+      this.jwtService.signAsync(payload, { secret: this.config.get('JWT_REFRESH_SECRET'), expiresIn: this.config.get('JWT_REFRESH_EXPIRATION', '7d') }),
     ]);
     return { accessToken, refreshToken };
   }
 
   private async blacklistRefreshToken(token: string): Promise<void> {
-    const hash = this.hashToken(token);
-    await this.redis.set(
-      `${REFRESH_BLACKLIST}${hash}`,
-      '1',
-      REFRESH_TTL_SECONDS,
-    );
+    await this.redis.set(SECURITY.REDIS_KEYS.REFRESH_BLACKLIST(this.hashToken(token)), '1', SECURITY.REFRESH_TOKEN_TTL);
   }
 
-  /** Hash SHA-256 del token para no almacenar el token en crudo en Redis */
   private hashToken(token: string): string {
     return crypto.createHash('sha256').update(token).digest('hex');
+  }
+
+  private async incrementWithTTL(key: string, ttl: number): Promise<number> {
+    const current = await this.redis.get(key);
+    const count   = parseInt(current ?? '0', 10) + 1;
+    await this.redis.set(key, String(count), ttl);
+    return count;
   }
 
   sanitizeUser(user: UserOrmEntity) {

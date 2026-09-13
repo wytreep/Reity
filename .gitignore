@@ -1,21 +1,21 @@
-# ─── Dependencies ─────────────────────────────────────
+# Dependencies
 node_modules/
 .yarn/cache
 .yarn/install-state.gz
 
-# ─── Environment ──────────────────────────────────────
+# Environment — NUNCA subir al repo
 .env
 .env.local
 .env.*.local
 !.env.example
 
-# ─── Build outputs ────────────────────────────────────
+# Build
 dist/
 build/
 .next/
 out/
 
-# ─── Expo / React Native ──────────────────────────────
+# Expo / React Native
 .expo/
 *.jks
 *.p8
@@ -27,21 +27,23 @@ web-build/
 android/
 ios/
 
-# ─── IDE ──────────────────────────────────────────────
+# IDE
 .vscode/settings.json
 .idea/
-*.sublime-*
 
-# ─── OS ───────────────────────────────────────────────
+# OS
 .DS_Store
 Thumbs.db
 
-# ─── Logs ─────────────────────────────────────────────
+# Logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# ─── Coverage ─────────────────────────────────────────
+# Coverage
 coverage/
 .nyc_output/
+
+# Railway
+.railway/
