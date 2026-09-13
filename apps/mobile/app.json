@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Reity",
+    "slug": "reity",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.reity.app"
+    },
+    "android": {
+      "package": "com.reity.app",
+      "permissions": ["USE_BIOMETRIC", "USE_FINGERPRINT", "VIBRATE"]
+    },
+    "plugins": ["expo-router", "expo-local-authentication"],
+    "experiments": { "typedRoutes": true },
+    "scheme": "reity"
+  }
+}

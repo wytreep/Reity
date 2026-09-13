@@ -1,0 +1,32 @@
+{
+  "name": "reity",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reity - Finanzas Personales Inteligentes (monorepo)",
+  "workspaces": [
+    "apps/backend",
+    "apps/mobile"
+  ],
+  "scripts": {
+    "backend": "yarn workspace @reity/backend start:dev",
+    "mobile": "yarn workspace @reity/mobile start",
+    "backend:build": "yarn workspace @reity/backend build",
+    "backend:test": "yarn workspace @reity/backend test",
+    "backend:lint": "yarn workspace @reity/backend lint",
+    "mobile:lint": "yarn workspace @reity/mobile lint",
+    "docker:up": "docker compose -f docker/docker-compose.yml up -d",
+    "docker:down": "docker compose -f docker/docker-compose.yml down",
+    "docker:logs": "docker compose -f docker/docker-compose.yml logs -f"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "yarn": ">=1.22.0"
+  },
+  "devDependencies": {
+    "babel-plugin-module-resolver": "^5.0.3"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "^3.1.1",
+    "expo-linking": "^57.0.9"
+  }
+}
