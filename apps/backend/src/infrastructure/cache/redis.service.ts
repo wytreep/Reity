@@ -10,17 +10,29 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly config: ConfigService) {}
 
   onModuleInit() {
-    this.client = new Redis({
-      host: this.config.get('REDIS_HOST', 'localhost'),
-      port: this.config.get<number>('REDIS_PORT', 6379),
-      password: this.config.get('REDIS_PASSWORD') || undefined,
-      retryStrategy: (times) => {
-        // Reintentar con backoff exponencial, máx 30s
-        const delay = Math.min(times * 500, 30_000);
-        this.logger.warn(`Redis reconectando... intento ${times}, delay ${delay}ms`);
-        return delay;
-      },
-    });
+    const redisUrl = this.config.get<string>('REDIS_URL');
+
+    if (redisUrl) {
+      this.client = new Redis(redisUrl, {
+        tls: redisUrl.startsWith('rediss://') ? { rejectUnauthorized: false } : undefined,
+        retryStrategy: (times) => {
+          const delay = Math.min(times * 500, 30_000);
+          this.logger.warn(`Redis reconectando... intento ${times}, delay ${delay}ms`);
+          return delay;
+        },
+      });
+    } else {
+      this.client = new Redis({
+        host: this.config.get('REDIS_HOST', 'localhost'),
+        port: this.config.get<number>('REDIS_PORT', 6379),
+        password: this.config.get('REDIS_PASSWORD') || undefined,
+        retryStrategy: (times) => {
+          const delay = Math.min(times * 500, 30_000);
+          this.logger.warn(`Redis reconectando... intento ${times}, delay ${delay}ms`);
+          return delay;
+        },
+      });
+    }
 
     this.client.on('connect', () => this.logger.log('✅ Redis conectado'));
     this.client.on('error', (err) => this.logger.error('Redis error:', err.message));

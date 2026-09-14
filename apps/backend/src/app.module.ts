@@ -31,20 +31,43 @@ import { HealthModule } from './shared/health/health.module';
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        type: 'postgres',
-        host: config.get('DB_HOST', 'localhost'),
-        port: config.get<number>('DB_PORT', 5432),
-        username: config.get('DB_USERNAME'),
-        password: config.get('DB_PASSWORD'),
-        database: config.get('DB_NAME'),
-        entities: [__dirname + '/infrastructure/database/typeorm/entities/*.entity{.ts,.js}'],
-        migrations: [__dirname + '/infrastructure/database/migrations/*{.ts,.js}'],
-        synchronize: config.get('NODE_ENV') === 'development' && config.get('DB_SYNC') === 'true',
-        logging: config.get('DB_LOGGING') === 'true',
-        ssl: config.get('NODE_ENV') === 'production' ? { rejectUnauthorized: false } : false,
-        extra: { max: 10, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30000 },
-      }),
+      useFactory: (config: ConfigService) => {
+        const dbUrl = config.get<string>('DATABASE_URL');
+        const dbHost = config.get<string>('DB_HOST', 'localhost');
+        const isProd = config.get('NODE_ENV') === 'production';
+        const useSsl =
+          config.get('DB_SSL') === 'true' ||
+          isProd ||
+          dbHost.includes('supabase.co') ||
+          dbHost.includes('supabase.com') ||
+          (dbUrl && (dbUrl.includes('supabase') || dbUrl.includes('sslmode=require')));
+
+        const baseConfig = {
+          type: 'postgres' as const,
+          entities: [__dirname + '/infrastructure/database/typeorm/entities/*.entity{.ts,.js}'],
+          migrations: [__dirname + '/infrastructure/database/migrations/*{.ts,.js}'],
+          synchronize: config.get('DB_SYNC') === 'true' || config.get('NODE_ENV') === 'development',
+          logging: config.get('DB_LOGGING') === 'true',
+          ssl: useSsl ? { rejectUnauthorized: false } : false,
+          extra: { max: 10, connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000 },
+        };
+
+        if (dbUrl) {
+          return {
+            ...baseConfig,
+            url: dbUrl,
+          };
+        }
+
+        return {
+          ...baseConfig,
+          host: dbHost,
+          port: config.get<number>('DB_PORT', 5432),
+          username: config.get<string>('DB_USERNAME', 'postgres'),
+          password: config.get<string>('DB_PASSWORD', ''),
+          database: config.get<string>('DB_NAME', 'postgres'),
+        };
+      },
     }),
 
     CacheModule,
